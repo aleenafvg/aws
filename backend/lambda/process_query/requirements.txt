@@ -1,0 +1,5 @@
+# Yojana-Setu Lambda Dependencies
+# boto3 and botocore are included in the Lambda runtime
+# but pinned here for reproducibility and local development
+boto3>=1.34.0
+botocore>=1.34.0

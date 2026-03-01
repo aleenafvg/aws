@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Yojana-Setu – Voice-first AI assistant for government scheme access.
+  Pan-India multilingual backend (Transcribe, Bedrock, Kendra, Polly).
+
+# ──────────────────────────────────────────────
+# Global configuration
+# ──────────────────────────────────────────────
+Globals:
+  Function:
+    Timeout: 180            # 3-minute max for async pipeline
+    Runtime: python3.11
+    MemorySize: 512
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+        # SECURITY: All secrets via env vars, never hardcoded
+        AUDIO_INPUT_BUCKET: !Ref AudioInputBucket
+        AUDIO_OUTPUT_BUCKET: !Ref AudioOutputBucket
+        INTERACTIONS_TABLE: !Ref InteractionsTable
+        KENDRA_INDEX_ID: !Ref KendraIndexId
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        RATE_LIMIT_MAX_REQUESTS: !Ref RateLimitMaxRequests
+        RATE_LIMIT_WINDOW_SECONDS: !Ref RateLimitWindowSeconds
+
+# ──────────────────────────────────────────────
+# Parameters – configurable at deploy time
+# ──────────────────────────────────────────────
+Parameters:
+  KendraIndexId:
+    Type: String
+    Description: Amazon Kendra Index ID for scheme retrieval
+    Default: "PLACEHOLDER_KENDRA_INDEX_ID"
+
+  BedrockModelId:
+    Type: String
+    Description: Amazon Bedrock model ID
+    Default: "anthropic.claude-3-5-sonnet-20241022-v2:0"
+
+  RateLimitMaxRequests:
+    Type: Number
+    Description: Maximum requests per IP per window
+    Default: 10
+
+  RateLimitWindowSeconds:
+    Type: Number
+    Description: Rate limiting window in seconds
+    Default: 60
+
+  AudioRetentionDays:
+    Type: Number
+    Description: Days to retain user audio before auto-delete
+    Default: 1
+
+# ──────────────────────────────────────────────
+# Resources
+# ──────────────────────────────────────────────
+Resources:
+
+  # ── API Gateway ─────────────────────────────
+  YojanasetuApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: prod
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"       # Restrict in production to your frontend domain
+        AllowMethods:
+          - POST
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - X-Forwarded-For
+        MaxAge: 3600
+      # SECURITY: API Gateway rate limiting (throttle)
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+
+  # ── Lambda Function ─────────────────────────
+  ProcessQueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: yojanasetu-process-query
+      CodeUri: lambda/process_query/
+      Handler: handler.lambda_handler
+      Description: "Processes multilingual voice queries through Transcribe → Bedrock → Kendra → Polly pipeline"
+      Events:
+        ProcessQuery:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref YojanasetuApi
+            Path: /api/process-multilingual-query
+            Method: POST
+      # SECURITY: IAM least privilege – only permissions needed
+      Policies:
+        # S3 – audio upload/download
+        - S3CrudPolicy:
+            BucketName: !Ref AudioInputBucket
+        - S3CrudPolicy:
+            BucketName: !Ref AudioOutputBucket
+        # Transcribe – start and get transcription jobs
+        - Statement:
+            - Effect: Allow
+              Action:
+                - transcribe:StartTranscriptionJob
+                - transcribe:GetTranscriptionJob
+              Resource: "*"
+        # Bedrock – invoke model
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/*"
+        # Kendra – query index
+        - Statement:
+            - Effect: Allow
+              Action:
+                - kendra:Query
+                - kendra:Retrieve
+              Resource: !Sub "arn:aws:kendra:${AWS::Region}:${AWS::AccountId}:index/*"
+        # Polly – synthesize speech
+        - Statement:
+            - Effect: Allow
+              Action:
+                - polly:SynthesizeSpeech
+              Resource: "*"
+        # DynamoDB – read/write interactions
+        - DynamoDBCrudPolicy:
+            TableName: !Ref InteractionsTable
+        # DynamoDB – rate limiting table
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RateLimitTable
+
+  # ── S3 Buckets ──────────────────────────────
+
+  # Bucket A – User audio uploads (temporary)
+  AudioInputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "yojanasetu-audio-input-${AWS::AccountId}"
+      # SECURITY: Server-side encryption with KMS
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      # SECURITY: Auto-delete audio after retention period
+      LifecycleConfiguration:
+        Rules:
+          - Id: AutoDeleteAudio
+            Status: Enabled
+            ExpirationInDays: !Ref AudioRetentionDays
+      # SECURITY: Block public access
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # Bucket C – Generated audio responses
+  AudioOutputBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "yojanasetu-audio-output-${AWS::AccountId}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+      LifecycleConfiguration:
+        Rules:
+          - Id: AutoDeleteResponses
+            Status: Enabled
+            ExpirationInDays: !Ref AudioRetentionDays
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ── DynamoDB Tables ─────────────────────────
+
+  # Main interactions log
+  InteractionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: GlobalInteractions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: SessionId
+          AttributeType: S
+        - AttributeName: Timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: SessionId
+          KeyType: HASH
+        - AttributeName: Timestamp
+          KeyType: RANGE
+      # SECURITY: Encryption at rest
+      SSESpecification:
+        SSEEnabled: true
+
+  # Rate limiting table
+  RateLimitTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: YojanaSetuRateLimit
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: IpAddress
+          AttributeType: S
+      KeySchema:
+        - AttributeName: IpAddress
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ExpiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+# ──────────────────────────────────────────────
+# Outputs
+# ──────────────────────────────────────────────
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${YojanasetuApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+
+  ProcessQueryFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt ProcessQueryFunction.Arn
+
+  AudioInputBucketName:
+    Description: S3 bucket for audio input
+    Value: !Ref AudioInputBucket
+
+  AudioOutputBucketName:
+    Description: S3 bucket for audio output
+    Value: !Ref AudioOutputBucket

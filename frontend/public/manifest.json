@@ -1,0 +1,17 @@
+{
+    "name": "Yojana-Setu",
+    "short_name": "YojanaSetu",
+    "description": "Voice-first AI for accessing government schemes in any Indian language",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#020617",
+    "theme_color": "#020617",
+    "orientation": "portrait",
+    "icons": [
+        {
+            "src": "/vite.svg",
+            "sizes": "any",
+            "type": "image/svg+xml"
+        }
+    ]
+}

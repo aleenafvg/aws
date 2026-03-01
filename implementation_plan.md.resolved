@@ -1,0 +1,246 @@
+# Yojana-Setu – Implementation Plan
+
+A voice-first, zero-typing AI assistant for rural Indian citizens to access government scheme information in any Indian language.
+
+## User Review Required
+
+> [!IMPORTANT]
+> **AWS Account & Credentials**: The backend relies on AWS services (Transcribe, Bedrock, Kendra, Polly, S3, DynamoDB). You will need an AWS account with these services enabled and appropriate credentials configured. The Lambda functions will use environment variables — no keys are hardcoded.
+
+> [!IMPORTANT]
+> **Kendra Index**: Amazon Kendra requires a pre-provisioned index with government scheme documents ingested. This plan creates the Lambda code to query Kendra but does NOT provision the index itself (that requires uploading scheme PDFs and configuring data sources).
+
+> [!WARNING]
+> **Tailwind CSS**: Per your PRD, we will use Tailwind CSS v4 for the frontend. This overrides the default styling preference.
+
+---
+
+## Proposed Changes
+
+### 1. Project Scaffolding
+
+#### [NEW] Project root structure
+
+```
+c:\Projects\aws\
+├── frontend/           # React + Vite + Tailwind PWA
+│   ├── public/
+│   ├── src/
+│   │   ├── components/
+│   │   ├── hooks/
+│   │   ├── utils/
+│   │   ├── styles/
+│   │   ├── App.jsx
+│   │   └── main.jsx
+│   ├── index.html
+│   ├── vite.config.js
+│   ├── tailwind.config.js
+│   └── package.json
+├── backend/
+│   ├── lambda/
+│   │   ├── process_query/
+│   │   │   ├── handler.py
+│   │   │   ├── transcribe_service.py
+│   │   │   ├── bedrock_service.py
+│   │   │   ├── kendra_service.py
+│   │   │   ├── polly_service.py
+│   │   │   ├── dynamo_service.py
+│   │   │   ├── validators.py
+│   │   │   ├── rate_limiter.py
+│   │   │   └── requirements.txt
+│   │   └── __init__.py
+│   └── template.yaml      # AWS SAM template
+└── README.md
+```
+
+---
+
+### 2. Frontend – Voice Interface & UI
+
+#### [NEW] [index.html](file:///c:/Projects/aws/frontend/index.html)
+- HTML5 entry point with PWA meta tags, viewport for mobile, Google Fonts (Inter)
+
+#### [NEW] [vite.config.js](file:///c:/Projects/aws/frontend/vite.config.js)
+- Vite configuration with React plugin, PWA plugin
+
+#### [NEW] [tailwind.config.js](file:///c:/Projects/aws/frontend/tailwind.config.js)
+- Custom theme: dark color palette, animation keyframes for pulse/glow effects
+
+#### [NEW] [src/main.jsx](file:///c:/Projects/aws/frontend/src/main.jsx)
+- React entry point, renders `<App />`
+
+#### [NEW] [src/App.jsx](file:///c:/Projects/aws/frontend/src/App.jsx)
+- Root component managing screen state: `splash → main → processing → result`
+- Renders `SplashScreen` for 2s on load, then `MainScreen`
+
+#### [NEW] [src/components/SplashScreen.jsx](file:///c:/Projects/aws/frontend/src/components/SplashScreen.jsx)
+- Plain empty background, clean font
+- Typewriter animation displays "1598" (and "Yojana-Setu" subtitle)
+- 1-2 second duration, then auto-transitions
+
+#### [NEW] [src/components/MainScreen.jsx](file:///c:/Projects/aws/frontend/src/components/MainScreen.jsx)
+- Central microphone button (large, animated pulse)
+- No language dropdown, no text input
+- Status text showing current state (Ready / Listening / Processing / Error)
+- Response area: native text + audio playback
+- Language badge with confidence score
+
+#### [NEW] [src/components/MicButton.jsx](file:///c:/Projects/aws/frontend/src/components/MicButton.jsx)
+- Animated circular button with press-to-record
+- Visual feedback: idle → recording (pulsing red) → processing (spinning)
+
+#### [NEW] [src/components/ResponseCard.jsx](file:///c:/Projects/aws/frontend/src/components/ResponseCard.jsx)
+- Displays AI response text in native language
+- Audio player for TTS response
+- Detected language + confidence badge
+- Scheme ID reference
+
+#### [NEW] [src/components/ErrorDisplay.jsx](file:///c:/Projects/aws/frontend/src/components/ErrorDisplay.jsx)
+- Graceful error messages
+- Retry button
+
+#### [NEW] [src/hooks/useVoiceRecorder.js](file:///c:/Projects/aws/frontend/src/hooks/useVoiceRecorder.js)
+- MediaRecorder API wrapper
+- 15-second max recording
+- Voice Activity Detection (simple energy-based)
+- Returns audio blob
+
+#### [NEW] [src/hooks/useApi.js](file:///c:/Projects/aws/frontend/src/hooks/useApi.js)
+- API client for `/process-multilingual-query`
+- Sends audio as multipart/form-data
+- Handles loading/error states
+- No API keys stored client-side
+
+#### [NEW] [src/utils/audioUtils.js](file:///c:/Projects/aws/frontend/src/utils/audioUtils.js)
+- Audio compression helpers
+- Blob format conversion
+
+#### [NEW] [src/styles/index.css](file:///c:/Projects/aws/frontend/src/styles/index.css)
+- Tailwind directives (@tailwind base/components/utilities)
+- Custom animations: typewriter, pulse-glow, fade-in
+
+---
+
+### 3. Backend – AWS Lambda Pipeline
+
+#### [NEW] [template.yaml](file:///c:/Projects/aws/backend/template.yaml)
+- AWS SAM template defining:
+  - API Gateway HTTP API v2
+  - Lambda function (Python 3.11, 3-min timeout)
+  - S3 buckets (audio input, audio output, scheme PDFs)
+  - DynamoDB table `GlobalInteractions`
+  - IAM roles with least privilege
+  - Environment variables for all service configs
+  - Rate limiting via API Gateway throttling
+
+#### [NEW] [handler.py](file:///c:/Projects/aws/backend/lambda/process_query/handler.py)
+- Main Lambda entrypoint
+- Request parsing (multipart/form-data audio extraction)
+- Orchestrates full pipeline: upload → transcribe → translate → retrieve → generate → TTS → log
+- Input validation via `validators.py`
+- Rate limiting via `rate_limiter.py`
+- Returns JSON response per API spec
+- Security: CORS headers, input sanitization, no key exposure
+
+#### [NEW] [validators.py](file:///c:/Projects/aws/backend/lambda/process_query/validators.py)
+- Schema-based validation (audio file size, MIME type, content length)
+- Type checks, length limits
+- Reject unexpected fields
+- Sanitize all inputs
+
+#### [NEW] [rate_limiter.py](file:///c:/Projects/aws/backend/lambda/process_query/rate_limiter.py)
+- IP-based rate limiting using DynamoDB
+- Token bucket algorithm
+- Configurable limits via env vars (default: 10 req/min per IP)
+- Returns proper 429 with Retry-After header
+
+#### [NEW] [transcribe_service.py](file:///c:/Projects/aws/backend/lambda/process_query/transcribe_service.py)
+- Upload audio to S3
+- Start Transcribe job with `IdentifyLanguage=True`
+- Poll for completion with retry logic
+- Extract transcript + detected language + confidence
+
+#### [NEW] [bedrock_service.py](file:///c:/Projects/aws/backend/lambda/process_query/bedrock_service.py)
+- Two Bedrock calls:
+  1. Translate native query → optimized English search terms
+  2. Generate grounded answer in native language from Kendra context
+- Uses Claude 3.5 Sonnet
+- Strict context-only prompting to prevent hallucination
+
+#### [NEW] [kendra_service.py](file:///c:/Projects/aws/backend/lambda/process_query/kendra_service.py)
+- Query Kendra index with English search terms
+- Extract top relevant passages
+- Return structured context
+
+#### [NEW] [polly_service.py](file:///c:/Projects/aws/backend/lambda/process_query/polly_service.py)
+- Language → voice mapping for all 10 supported languages
+- Neural voice preferred, Standard fallback
+- Synthesize speech, upload to S3
+- Return presigned URL
+
+#### [NEW] [dynamo_service.py](file:///c:/Projects/aws/backend/lambda/process_query/dynamo_service.py)
+- Log interaction to `GlobalInteractions` table
+- Schema: SessionId (PK), Timestamp (SK), all specified attributes
+
+#### [NEW] [requirements.txt](file:///c:/Projects/aws/backend/lambda/process_query/requirements.txt)
+- boto3, botocore (Lambda includes these but pinned for reproducibility)
+
+---
+
+### 4. Security Hardening (Integrated Above)
+
+All security measures are woven into the components above:
+
+| Measure | Location |
+|---|---|
+| Rate limiting (IP-based, 429s) | `rate_limiter.py` + API Gateway throttling |
+| Input validation & sanitization | `validators.py` + `handler.py` |
+| Secure API key handling | SAM `template.yaml` (env vars only) |
+| S3 encryption | SAM template (SSE-KMS) |
+| IAM least privilege | SAM template (per-service policies) |
+| Audio auto-delete | S3 lifecycle rules (24h TTL) |
+| CORS | API Gateway config |
+| No client-side secrets | Frontend uses relative API paths only |
+
+---
+
+## Verification Plan
+
+### Automated Tests
+
+1. **Frontend build check**:
+   ```bash
+   cd c:\Projects\aws\frontend && npm run build
+   ```
+   Verify: Build completes with no errors.
+
+2. **Frontend dev server**:
+   ```bash
+   cd c:\Projects\aws\frontend && npm run dev
+   ```
+   Verify via browser: Splash screen appears, mic button renders, UI is responsive.
+
+3. **SAM template validation**:
+   ```bash
+   cd c:\Projects\aws\backend && sam validate
+   ```
+   Verify: Template is valid.
+
+### Browser Verification
+
+1. Open the frontend dev server URL
+2. Verify splash screen shows "1598" with typewriter animation for ~2s
+3. Verify main screen shows mic button centered, no language dropdown, no text input
+4. Verify mic button shows visual feedback on click (recording state)
+5. Verify mobile responsiveness (resize browser to phone width)
+6. Verify dark mode / premium aesthetics
+
+### Manual Verification (User)
+
+> [!NOTE]
+> Full end-to-end testing (voice → AWS services → response) requires AWS credentials and provisioned services. The frontend can be verified standalone with the dev server. The backend SAM template can be validated locally but deployment requires AWS CLI configured.
+
+1. Deploy backend: `sam build && sam deploy --guided`
+2. Update frontend API URL to the deployed API Gateway endpoint
+3. Speak a query in any supported Indian language
+4. Verify: language detected, response in same language, audio plays back
